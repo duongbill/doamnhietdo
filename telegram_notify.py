@@ -41,7 +41,7 @@ def send_telegram_message(message, temp=None, hum=None):
     try:
         res = requests.post(url, json=payload, timeout=10)
         if res.status_code == 200:
-            print(f"✅ [Telegram] Đã gửi: {message}")
+            print(f"✅ [Telegram] Đã gửi: {message.splitlines()[0]}") # Chỉ in dòng đầu của tin nhắn
         else:
             print(f"❌ [Telegram] Lỗi gửi: {res.status_code} - {res.text}")
     except Exception as e:
@@ -73,13 +73,17 @@ def get_updates(offset=None):
 
 # --- Chương trình chính ---
 if __name__ == "__main__":
-    print("🚀 Bot Telegram ESP32 đang chạy...")
+    print("🚀 Bot Telegram ESP32 đang chạy (Cập nhật 15 giây)...")
     last_temp, last_hum = None, None
     last_update_id = None
-    last_sent = 0
+    last_sent_alert = 0 # Đổi tên biến cho rõ ràng
 
     while True:
-        # 1️⃣ Kiểm tra lệnh từ nhóm
+        # 1️⃣ Lấy dữ liệu MỘT LẦN DUY NHẤT khi bắt đầu vòng lặp
+        print("\n--- Bắt đầu vòng lặp mới ---")
+        temp, hum = fetch_latest_data()
+
+        # 2️⃣ Kiểm tra lệnh từ nhóm (Dùng dữ liệu đã lấy)
         updates = get_updates(last_update_id)
         if updates and "result" in updates:
             for item in updates["result"]:
@@ -89,27 +93,44 @@ if __name__ == "__main__":
                 chat_id = msg.get("chat", {}).get("id")
 
                 if text.lower() == "/status" and str(chat_id) == CHAT_ID:
-                    temp, hum = fetch_latest_data()
+                    print("[Command] Nhận lệnh /status...")
                     if temp is not None:
                         di = temp - (0.55 - 0.55 * (hum / 100)) * (temp - 14.5)
                         send_telegram_message(
-                            f"📡 Trạng thái hiện tại:\n• Chỉ số khó chịu (DI): {di:.2f}",
+                            f"📡 Trạng thái theo yêu cầu:\n• Chỉ số khó chịu (DI): {di:.2f}",
                             temp, hum
                         )
                     else:
                         send_telegram_message("⚠️ Không lấy được dữ liệu từ ThingSpeak.")
 
-        # 2️⃣ Kiểm tra dữ liệu để cảnh báo tự động
-        temp, hum = fetch_latest_data()
+        # 3️⃣ Kiểm tra dữ liệu để cảnh báo tự động (Dùng dữ liệu đã lấy)
         if temp is not None and hum is not None:
             now = time.time()
-            if (temp > TEMP_HIGH or hum < HUM_LOW) and (now - last_sent > 300):
+            # Chỉ gửi cảnh báo nếu vượt ngưỡng VÀ đã hơn 5 phút kể từ cảnh báo trước
+            if (temp > TEMP_HIGH or hum < HUM_LOW) and (now - last_sent_alert > 300):
+                print("[Alert] Phát hiện ngưỡng bất thường!")
                 msg = ""
                 if temp > TEMP_HIGH:
                     msg += "🔥 *Cảnh báo:* Nhiệt độ cao bất thường!\n"
                 if hum < HUM_LOW:
                     msg += "💧 *Cảnh báo:* Độ ẩm thấp hơn ngưỡng!"
                 send_telegram_message(msg, temp, hum)
-                last_sent = now
+                last_sent_alert = now # Cập nhật thời gian gửi cảnh báo
+            
+            # 4️⃣ GỬI BÁO CÁO ĐỊNH KỲ (MỚI)
+            # Luôn gửi báo cáo này mỗi khi vòng lặp chạy
+            print("[Status] Gửi báo cáo định kỳ...")
+            di = temp - (0.55 - 0.55 * (hum / 100)) * (temp - 14.5)
+            send_telegram_message(
+                f"📡 Báo cáo định kỳ:\n• Chỉ số khó chịu (DI): {di:.2f}",
+                temp, hum
+            )
 
-        time.sleep(10)
+        elif temp is None:
+            # Gửi thông báo lỗi nếu không lấy được dữ liệu
+            send_telegram_message("⚠️ Không lấy được dữ liệu từ ThingSpeak cho báo cáo định kỳ.")
+
+
+        # 5️⃣ Ngủ 15 giây
+        print(f"--- Hoàn tất vòng lặp, ngủ 15 giây ---")
+        time.sleep(15)
