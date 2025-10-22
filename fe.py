@@ -4,8 +4,10 @@ import pandas as pd
 import json
 import time
 import pytz
-import os 
-from urllib.request import Request, urlopen # Dùng để gọi API
+import os
+from dotenv import load_dotenv
+load_dotenv()
+from telegram_notify import send_telegram_message
 
 # --- CẤU HÌNH TIMEZONE ---
 VN_TIMEZONE = pytz.timezone('Asia/Ho_Chi_Minh')
@@ -32,6 +34,18 @@ st.set_page_config(
     page_title="Giám sát ESP32 & DHT22 (ThingSpeak)",
     layout="wide"
 )
+
+TEMP_ALERT = float(os.getenv("TEMP_ALERT_THRESHOLD", "30"))
+DI_ALERT = float(os.getenv("DI_ALERT_THRESHOLD", "28"))
+
+# Alert behavior tuning (seconds and minimum change to re-alert)
+ALERT_COOLDOWN = int(os.getenv("ALERT_COOLDOWN_SECONDS", "300"))  # default 5 minutes
+ALERT_DELTA_TEMP = float(os.getenv("ALERT_DELTA_TEMP", "0.5"))   # temp change to re-alert
+ALERT_DELTA_DI = float(os.getenv("ALERT_DELTA_DI", "0.5"))       # DI change to re-alert
+
+# last_alert state stores: {"type": "temp"|"di"|None, "value": float, "time": epoch_seconds}
+if "last_alert" not in st.session_state:
+    st.session_state["last_alert"] = {"type": None, "value": None, "time": 0}
 
 def calculate_discomfort_index(temp, hum_percent):
     """Tính toán Chỉ số Khó chịu (DI) dựa trên nhiệt độ và độ ẩm."""
@@ -206,7 +220,95 @@ while True:
             
             # Cập nhật dữ liệu khí hậu mới nhất vào session state
             st.session_state.latest_climate_data = {"temp": temp, "hum": hum, "di": di_index}
+            
+            # Kiểm tra và gửi thông báo qua Telegram nếu cần (cooldown, hysteresis, recovery)
+            latest = st.session_state.get("latest_climate_data", {})
+            if latest:
+                def _to_float(v, default=None):
+                    try:
+                        return float(v) if v is not None else default
+                    except Exception:
+                        return default
 
+                # Lấy giá trị (ưu tiên key session 'temp','hum','di', fallback cột tiếng Việt nếu có)
+                t = _to_float(latest.get("Nhiệt độ (°C)"), _to_float(latest.get("temp"), None))
+                h = _to_float(latest.get("Độ ẩm (%)"), _to_float(latest.get("hum"), None))
+                di = _to_float(latest.get("DI"), _to_float(latest.get("di"), None))
+
+                now = time.time()
+                last = st.session_state.get("last_alert", {"type": None, "temp": None, "di": None, "time": 0})
+                last_type = last.get("type")
+                last_time = last.get("time", 0)
+
+                # Quy tắc quyết định gửi cảnh báo cho từng loại
+                def should_send(kind, value, threshold, last, delta):
+                    # only alert when value exists and strictly greater than threshold
+                    if value is None:
+                        return False
+                    if not (value > threshold):
+                        return False
+
+                    # If no previous alert ever -> send
+                    if not last or last.get("type") is None:
+                        return True
+
+                    # If previous alert included this kind (same or both) -> check cooldown or delta
+                    if last.get("type") in (kind, "both"):
+                        last_val = last.get(kind)
+                        # send if value changed enough
+                        if last_val is None:
+                            return True
+                        if abs(value - last_val) >= delta:
+                            return True
+                        # or if cooldown passed
+                        if (now - last.get("time", 0)) >= ALERT_COOLDOWN:
+                            return True
+                        return False
+
+                    # If previous alert was for other kind -> allow sending (new condition)
+                    return True
+
+                temp_need = should_send("temp", t, TEMP_ALERT, last, ALERT_DELTA_TEMP)
+                di_need = should_send("di", di, DI_ALERT, last, ALERT_DELTA_DI)
+
+                # Gộp thông báo (gửi 1 message nếu có 1+ cảnh báo)
+                if temp_need or di_need:
+                    parts = []
+                    if temp_need:
+                        parts.append(f"Nhiệt độ {t:.1f}°C > ngưỡng {TEMP_ALERT}°C")
+                    if di_need:
+                        parts.append(f"Chỉ số khó chịu DI={di:.2f} > ngưỡng {DI_ALERT}")
+                    warning_text = " ; ".join(parts)
+                    sent = send_telegram_message(t if t is not None else 0, h if h is not None else 0, warning_text)
+                    if sent:
+                        sent_type = "both" if (temp_need and di_need) else ("temp" if temp_need else "di")
+                        st.session_state["last_alert"] = {
+                            "type": sent_type,
+                            "temp": t,
+                            "di": di,
+                            "time": now
+                        }
+
+                else:
+                    # Xử lý phục hồi: gửi khi từng loại đã alert trước đó và giờ <= ngưỡng (gộp nếu nhiều)
+                    prev = st.session_state.get("last_alert", {})
+                    prev_type = prev.get("type")
+                    prev_time = prev.get("time", 0)
+                    recovery_parts = []
+
+                    # chỉ gửi phục hồi cho loại từng được alert trước đó
+                    if prev_type in ("temp", "both") and (t is not None) and (t <= TEMP_ALERT):
+                        recovery_parts.append(f"Nhiệt độ giảm xuống {t:.1f}°C (<= ngưỡng {TEMP_ALERT}°C)")
+                    if prev_type in ("di", "both") and (di is not None) and (di <= DI_ALERT):
+                        recovery_parts.append(f"DI giảm xuống {di:.2f} (<= ngưỡng {DI_ALERT})")
+
+                    # Gửi phục hồi nếu có ít nhất 1 mục phục hồi; tránh spam bằng reset last_alert sau khi gửi
+                    if recovery_parts:
+                        rec_text = " ; ".join(recovery_parts)
+                        sent = send_telegram_message(t if t is not None else 0, h if h is not None else 0, f"Phục hồi: {rec_text}")
+                        if sent:
+                            st.session_state["last_alert"] = {"type": None, "temp": None, "di": None, "time": 0}
+            
             col1, col2, col3, col4, col5 = st.columns(5)
             
             col1.metric(label="Thời gian", value=latest_data['Thời gian'].strftime("%H:%M:%S"))
@@ -250,4 +352,4 @@ while True:
             st.dataframe(df)
 
     # Chờ 5 giây trước khi cập nhật lại dữ liệu
-    time.sleep(5)
+    time.sleep(10)
