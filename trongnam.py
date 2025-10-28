@@ -5,58 +5,70 @@ import json
 import time
 import pytz
 import os 
-from urllib.request import Request, urlopen # Dùng để gọi API
+from urllib.request import Request, urlopen 
 
 # --- CẤU HÌNH TIMEZONE ---
 VN_TIMEZONE = pytz.timezone('Asia/Ho_Chi_Minh')
 
-# --- THÔNG SỐ CẤU HÌNH THINGSPEAK ---
-# LƯU Ý: ĐÂY LÀ READ API KEY, KHÔNG PHẢI WRITE API KEY
-CHANNEL_ID = "3096685"
-READ_API_KEY = "XS2B689LXUN4I8LF"
-THING_SPEAK_URL = f"https://api.thingspeak.com/channels/{CHANNEL_ID}/feeds.json?api_key={READ_API_KEY}&results=20"
+# ===================================================================
+# --- THÔNG SỐ CẤU HÌNH THINGSPEAK (CHO DỮ LIỆU LỊCH SỬ) ---
+# ===================================================================
+# Vui lòng cập nhật lại KEY và ID của bạn nếu cần
+TS_CHANNEL_ID = "3096685"
+TS_READ_API_KEY = "XS2B689LXUN4I8LF"
+THING_SPEAK_URL = f"https://api.thingspeak.com/channels/{TS_CHANNEL_ID}/feeds.json?api_key={TS_READ_API_KEY}&results=20"
+
+
+# ===================================================================
+# --- THÔNG SỐ CẤU HÌNH BLYNK (CHO DỮ LIỆU MỚI NHẤT) ---
+# ===================================================================
+# Vui lòng cập nhật Auth Token Blynk của bạn
+BLYNK_AUTH_TOKEN = "66-qE5GDloyBqC053tlkW08eJ4E036fp"
+# ĐÃ SỬA: Chuyển sang URL chính thức của Blynk IoT (nền tảng mới) và dùng HTTPS
+BLYNK_CLOUD_URL = "https://blynk.cloud" 
+
+# Thời gian làm mới Dashboard (giữ nguyên)
 REFRESH_INTERVAL_SECONDS = 5
 
+# ===================================================================
 # --- CẤU HÌNH GEMINI AI ---
-GEMINI_API_KEY = ""
+# ===================================================================
+# LƯU Ý: VUI LÒNG ĐẢM BẢO KHÓA API NÀY LÀ HỢP LỆ VÀ ĐƯỢC KÍCH HOẠT
+GEMINI_API_KEY = "AIzaSyDf5v_2zUwCvnq3ObPdj49Bmo9Q7_MBq7k"
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent"
-# 🍄 PROMPT MỚI: CHỈ SỬ DỤNG 1 QUY TẮC VÀNG TỔNG HỢP 🍄
 SYSTEM_PROMPT = """Bạn là một chuyên gia về nuôi trồng nấm (Mycologist) với kiến thức chuyên sâu về nấm Bào Ngư.
 QUY TẮC VÀNG TỔNG HỢP cho NẤM BÀO NGƯ (Mọi giai đoạn):
-1. Môi trường Lý tưởng Tổng thể: Nhiệt độ 20°C - 28°C, Độ ẩm 70% - 95%.
+1. Môi trường Lý tưởng Tổng thể: Nhiệt độ 25°C - 30°C, Độ ẩm 80% - 85%.
 2. Nguy hiểm: T > 30°C (Quá nóng) hoặc H < 65% (Quá khô).
 
 Nhiệm vụ của bạn là phân tích dữ liệu hiện tại, đối chiếu với Quy tắc Vàng Tổng hợp và đưa ra các gợi ý hành động để tối ưu hóa sự phát triển. Khi trò chuyện, hãy trả lời ngắn gọn, thân thiện và sử dụng dữ liệu thực tế được cung cấp."""
 
-# Kiểm tra và khởi tạo lịch sử chat (cho tính năng Chatbot)
+# Khởi tạo Session State (giữ nguyên)
 if "messages" not in st.session_state:
     st.session_state["messages"] = [{"role": "model", "parts": [{"text": "Chào mừng đến với hệ thống cố vấn nấm học AI. Bạn có thể hỏi tôi về môi trường hiện tại hoặc các vấn đề của nấm!"}]}]
 if "latest_climate_data" not in st.session_state:
     st.session_state["latest_climate_data"] = {}
-# Khởi tạo thời gian làm mới cuối cùng
 if "last_refresh_time" not in st.session_state:
     st.session_state["last_refresh_time"] = time.time()
+# Biến lưu trữ log debug
+if "debug_log" not in st.session_state:
+    st.session_state["debug_log"] = []
 
+
+# --- LOGIC VÀ XỬ LÝ DỮ LIỆU CHUNG ---
 
 def calculate_mushroom_health_index(temp, hum_percent):
-    """Tính toán Chỉ số Sức khỏe Nấm (MHI).
-    MHI càng thấp càng tốt. Phạm vi lý tưởng: T 20-28C, H 70-95%.
-    """
+    """Tính toán Chỉ số Sức khỏe Nấm (MHI)."""
     try:
-        # Mục tiêu tối ưu cho Bào Ngư (Tổng hợp): T = 24C, H = 85%
         temp_ideal = 24.0
         hum_ideal = 85.0
-        
-        # Tính độ lệch T (penalty cho T quá cao/thấp)
         temp_penalty = abs(temp - temp_ideal)
         
-        # Tính độ lệch H (penalty cho H quá thấp - nguy hiểm hơn H quá cao)
         if hum_percent < 70.0:
-            hum_penalty = (70.0 - hum_percent) * 2 # Penalty gấp đôi nếu H quá thấp
+            hum_penalty = (70.0 - hum_percent) * 2
         else:
             hum_penalty = abs(hum_percent - hum_ideal) / 5
             
-        # MHI = (Trọng số T * Penalty T) + (Trọng số H * Penalty H)
         MHI = (temp_penalty * 0.6) + (hum_penalty * 0.4)
         return MHI
     except Exception:
@@ -64,7 +76,8 @@ def calculate_mushroom_health_index(temp, hum_percent):
 
 def generate_ai_suggestion(temp, hum, mhi_index):
     """Gọi Gemini API cho GỢI Ý TỰ ĐỘNG."""
-    if GEMINI_API_KEY == "ĐẶT KHÓA API CỦA BẠN VÀO ĐÂY":
+    # (Hàm giữ nguyên)
+    if not GEMINI_API_KEY or GEMINI_API_KEY == "ĐẶT KHÓA API CỦA BẠN VÀO ĐÂY":
         return "⚠️ Cảnh báo: Vui lòng cung cấp khóa API thực tế để kích hoạt AI."
 
     prompt_for_suggestion = (
@@ -81,7 +94,7 @@ def generate_ai_suggestion(temp, hum, mhi_index):
         headers = {'Content-Type': 'application/json'}
         full_url = f"{GEMINI_API_URL}?key={GEMINI_API_KEY}" 
         
-        response = requests.post(full_url, headers=headers, data=json.dumps(payload))
+        response = requests.post(full_url, headers=headers, data=json.dumps(payload), timeout=10)
         response.raise_for_status()
         
         result = response.json()
@@ -95,10 +108,10 @@ def generate_ai_suggestion(temp, hum, mhi_index):
 
 def chat_with_gemini(user_prompt):
     """Gọi Gemini API cho CHẾ ĐỘ TRÒ CHUYỆN (sử dụng lịch sử chat)."""
-    if GEMINI_API_KEY == "ĐẶT KHÓA API CỦA BẠN VÀO ĐÂY":
+    # (Hàm giữ nguyên)
+    if not GEMINI_API_KEY or GEMINI_API_KEY == "ĐẶT KHÓA API CỦA BẠN VÀO ĐÂY":
         return "Vui lòng cấu hình API Key để trò chuyện."
     
-    # Lấy MHI
     mhi_index = st.session_state.latest_climate_data.get('mhi', 'N/A')
     
     latest_data_context = (
@@ -125,7 +138,7 @@ def chat_with_gemini(user_prompt):
         headers = {'Content-Type': 'application/json'}
         full_url = f"{GEMINI_API_URL}?key={GEMINI_API_KEY}" 
         
-        response = requests.post(full_url, headers=headers, data=json.dumps(payload))
+        response = requests.post(full_url, headers=headers, data=json.dumps(payload), timeout=10)
         response.raise_for_status()
         
         result = response.json()
@@ -136,96 +149,182 @@ def chat_with_gemini(user_prompt):
     except Exception as e:
         return "Lỗi xử lý phản hồi chat."
 
+# --- CHỨC NĂNG LẤY DỮ LIỆU BLYNK (MỚI NHẤT) ---
 
-def fetch_data():
-    """Lấy dữ liệu JSON từ ThingSpeak API."""
+def fetch_blynk_pin(pin):
+    """Lấy giá trị hiện tại của một Virtual Pin từ Blynk Cloud API và in log."""
+    # SỬA LỖI: Đổi tham số vPin thành pin để tương thích với Blynk IoT Cloud
+    url = f"{BLYNK_CLOUD_URL}/external/api/get?token={BLYNK_AUTH_TOKEN}&pin={pin}" 
+    st.session_state.debug_log.append(f"DEBUG: Gọi API cho {pin}: {url}")
+    
     try:
-        response = requests.get(THING_SPEAK_URL)
-        response.raise_for_status()
-        return response.json()
+        response = requests.get(url, timeout=5)
+        st.session_state.debug_log.append(f"DEBUG: Pin {pin} - Mã trạng thái HTTP: {response.status_code}")
+        
+        # Nếu mã lỗi là 401, 404 (Auth Token sai, thiết bị offline, Pin sai)
+        if response.status_code >= 400:
+            error_text = response.text.strip()
+            st.session_state.debug_log.append(f"LỖI HTTP Pin {pin}: Status {response.status_code}. Phản hồi: {error_text}")
+            return None
+            
+        value_str = response.text.strip()
+        st.session_state.debug_log.append(f"DEBUG: Pin {pin} - Phản hồi thô: '{value_str}'")
+
+        # API mới của Blynk IoT trả về giá trị thô, không cần cố gắng parse JSON
+        return value_str
+    
     except requests.exceptions.RequestException as e:
-        st.error(f"Lỗi khi kết nối đến ThingSpeak: {e}")
+        error_msg = f"LỖI KẾT NỐI Pin {pin}: {e}. Kiểm tra URL/Mạng."
+        st.session_state.debug_log.append(error_msg)
+        return None
+    except Exception as e:
+        st.session_state.debug_log.append(f"LỖI XỬ LÝ Pin {pin}: {e}")
         return None
 
-def process_data(json_data):
-    """Xử lý dữ liệu JSON thành DataFrame và trích xuất dữ liệu mới nhất."""
+
+def fetch_latest_blynk_metrics():
+    """Lấy và xử lý dữ liệu mới nhất từ Blynk (cho metrics)."""
+    # XÓA LOG CŨ
+    st.session_state.debug_log = [f"--- Bắt đầu làm mới lúc {pd.Timestamp.now(tz=VN_TIMEZONE).strftime('%H:%M:%S')} ---"]
+    
+    raw_data = {}
+    raw_data['temp'] = fetch_blynk_pin("V0")
+    raw_data['hum'] = fetch_blynk_pin("V1")
+    raw_data['pump'] = fetch_blynk_pin("V2")
+    raw_data['fan'] = fetch_blynk_pin("V3")
+    
+    latest_metrics = {}
+    
+    # Hàm helper để chuyển đổi các giá trị thô thành 0 (OFF) hoặc 1 (ON)
+    def to_on_off_status(raw_val):
+        if raw_val is None or str(raw_val).strip() == '':
+            return 0 # Giả định là OFF nếu thiếu
+        
+        normalized_val = str(raw_val).strip().upper()
+        # Chấp nhận: "1", "1.0", "ON", "BẬT"
+        if normalized_val in ["1", "1.0", "ON", "BẬT"]:
+            return 1
+        return 0 # Trả về 0 cho các giá trị khác ("0", "OFF", "TẮT", v.v...)
+
+    # KHI CẢ 4 PIN ĐỀU CÓ DỮ LIỆU THÔ (chỉ cần không phải None)
+    if all(v is not None for v in raw_data.values()):
+        try:
+            # V0, V1 là nhiệt độ/độ ẩm (số). 
+            # pd.to_numeric trả về scalar float cho đầu vào string đơn.
+            temp_value = pd.to_numeric(raw_data['temp'], errors='coerce')
+            hum_value = pd.to_numeric(raw_data['hum'], errors='coerce')
+
+            # Đã SỬA LỖI: Loại bỏ .iloc[0] và .empty vì kết quả là scalar float (numpy.float64), 
+            # không phải Series, và lỗi "numpy.float64' object has no attribute 'empty'" đã được sửa.
+            latest_metrics['Nhiệt độ (°C)'] = temp_value
+            latest_metrics['Độ ẩm (%)'] = hum_value
+            
+            # V2 và V3 là trạng thái (0/1)
+            latest_metrics['Trạng thái Bơm'] = to_on_off_status(raw_data['pump'])
+            latest_metrics['Trạng thái Quạt'] = to_on_off_status(raw_data['fan'])
+            
+            latest_metrics['Thời gian'] = pd.Timestamp.now(tz=VN_TIMEZONE)
+            
+            st.session_state.debug_log.append("DEBUG: Phân tích dữ liệu Blynk THÀNH CÔNG.")
+            return latest_metrics, True
+        except Exception as e:
+            st.session_state.debug_log.append(f"LỖI PHÂN TÍCH DỮ LIỆU: {e}. Dữ liệu thô: {raw_data}")
+            return None, False
+    
+    st.session_state.debug_log.append("DEBUG: Thiếu dữ liệu từ một hoặc nhiều pins Blynk.")
+    return None, False
+
+# --- CHỨC NĂNG LẤY DỮ LIỆU THINGSPEAK (LỊCH SỬ) ---
+
+def fetch_thingspeak_history():
+    """Lấy và xử lý dữ liệu lịch sử từ ThingSpeak (cho biểu đồ)."""
+    try:
+        response = requests.get(THING_SPEAK_URL, timeout=10)
+        response.raise_for_status()
+        json_data = response.json()
+    except requests.exceptions.RequestException as e:
+        return None
+    except Exception:
+        return None
+
     if not json_data or 'feeds' not in json_data:
-        return None, None
+        return None
 
     feeds = json_data['feeds']
     df = pd.DataFrame(feeds)
     
     df = df.rename(columns={
         'created_at': 'Thời gian',
-        'field1': 'Độ ẩm (%)',
-        'field2': 'Nhiệt độ (°C)',
-        'field3': 'Trạng thái Bơm', 
-        'field4': 'Trạng thái Quạt'  # THÊM FIELD 4
+        'field1': 'Nhiệt độ (°C)', 
+        'field2': 'Độ ẩm (%)', 
     })
     
     df['Thời gian'] = pd.to_datetime(df['Thời gian'])
     df['Thời gian'] = df['Thời gian'].dt.tz_convert(VN_TIMEZONE)
     
+    # Đảm bảo chuyển đổi số, các giá trị lỗi sẽ là NaN
     df['Độ ẩm (%)'] = pd.to_numeric(df['Độ ẩm (%)'], errors='coerce')
     df['Nhiệt độ (°C)'] = pd.to_numeric(df['Nhiệt độ (°C)'], errors='coerce')
-    df['Trạng thái Bơm'] = pd.to_numeric(df['Trạng thái Bơm'], errors='coerce')
-    df['Trạng thái Quạt'] = pd.to_numeric(df['Trạng thái Quạt'], errors='coerce') # CHUYỂN ĐỔI FIELD 4
     
-    df = df.sort_values('Thời gian', ascending=False).reset_index(drop=True)
-    latest_data = df.iloc[0] if not df.empty else None
+    df = df.sort_values('Thời gian', ascending=True).reset_index(drop=True)
     
-    return df, latest_data
+    return df
 
-# 💡 LOGIC LÀM MỚI (RERUN) AN TOÀN - THAY THẾ WHILE TRUE
+# --- HÀM TỔNG HỢP (HYBRID) ---
+
+def fetch_hybrid_data():
+    """Lấy dữ liệu metrics từ Blynk và lịch sử từ ThingSpeak."""
+    
+    # 1. Lấy dữ liệu mới nhất (Metrics) từ Blynk
+    latest_metrics, is_blynk_success = fetch_latest_blynk_metrics()
+    
+    # 2. Lấy dữ liệu lịch sử (Chart) từ ThingSpeak
+    df_history = fetch_thingspeak_history()
+    
+    return df_history, latest_metrics, is_blynk_success
+
+# --- CHỨC NĂNG STREAMLIT ---
+
 def check_and_rerun():
     """Kiểm tra thời gian và tự động làm mới Streamlit."""
     current_time = time.time()
     if current_time - st.session_state["last_refresh_time"] >= REFRESH_INTERVAL_SECONDS:
-        st.session_state["last_refresh_time"] = current_time # Cập nhật thời gian làm mới
-        st.rerun() # Kích hoạt làm mới script
+        st.session_state["last_refresh_time"] = current_time 
+        st.rerun() 
 
-# ⚠️ HÀM HIỂN THỊ CẢNH BÁO TỰ ĐỘNG
 def display_alerts(temp, hum):
     """Kiểm tra các ngưỡng nguy hiểm và hiển thị cảnh báo."""
     alerts = []
     
-    # 1. Cảnh báo Lỗi dữ liệu (NaN)
+    # Kiểm tra NaN/None trước khi so sánh
     if pd.isna(temp) or pd.isna(hum):
-        alerts.append("❌ DỮ LIỆU LỖI: Không đọc được Nhiệt độ hoặc Độ ẩm. Vui lòng kiểm tra cảm biến DHT22.")
+        alerts.append("❌ DỮ LIỆU LỖI: Không đọc được Nhiệt độ/Độ ẩm từ Blynk. Kiểm tra kết nối.")
     
-    # 2. Cảnh báo Nguy hiểm Quá nhiệt (> 30C)
-    if temp > 30.0:
+    if pd.notna(temp) and temp > 30.0:
         alerts.append(f"🔥 NGUY HIỂM: Nhiệt độ quá cao ({temp:.1f}°C). Nguy cơ chết sợi nấm!")
-
-    # 3. Cảnh báo Nguy hiểm Độ ẩm thấp (< 65%)
-    if hum < 75.0:
-        alerts.append(f"💧 CẢNH BÁO: Độ ẩm quá thấp ({hum:.1f}%). Cần phun sương gấp để tránh chai nấm.")
-    
-    # 4. Cảnh báo Độ ẩm Quá cao (Nguy cơ nấm mốc)
-    if hum > 95.0:
-        alerts.append(f"💧 CẢNH BÁO: Độ ẩm quá cao ({hum:.1f}%). Nguy cơ ngưng tụ và nấm mốc bùng phát.")
+    if pd.notna(hum) and hum < 75.0:
+        alerts.append(f"💧 CẢNH BÁO: Độ ẩm quá thấp ({hum:.1f}%). Cần phun sương gấp.")
+    if pd.notna(hum) and hum > 95.0:
+        alerts.append(f"💧 CẢNH BÁO: Độ ẩm quá cao ({hum:.1f}%). Nguy cơ nấm mốc bùng phát.")
 
     if alerts:
         for alert in alerts:
-            st.error(alert) # Dùng st.error để hiển thị nổi bật
+            st.error(alert) 
         return True
     return False
 
 
 # --- GIAO DIỆN STREAMLIT ---
-
-# 1. BẬT WIDE LAYOUT ĐỂ DÙNG HẾT CHIỀU RỘNG MÀN HÌNH
 st.set_page_config(
     page_title="Cố vấn Khí hậu Trại Nấm",
-    layout="wide" # Dùng toàn bộ chiều rộng
+    layout="wide"
 )
 
 st.title("🍄 Hệ thống Cố vấn & Phân tích Khí hậu Trại Nấm (AI)")
 
-# Thiết lập Chatbot ở Sidebar
+# --- Sidebar Chatbot ---
 with st.sidebar:
     st.header("Trợ lý AI Nấm học")
-    
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["parts"][0]["text"])
@@ -243,73 +342,82 @@ with st.sidebar:
 
 
 # --- THỰC THI CHÍNH ---
-# LẤY DỮ LIỆU CHỈ MỘT LẦN KHI SCRIPT ĐƯỢC GỌI
-json_data = fetch_data()
-df, latest_data = process_data(json_data)
+df_history, latest_metrics, is_blynk_success = fetch_hybrid_data()
 
-# Tính toán MHI 
+# Khởi tạo các biến để tránh lỗi
+temp = None
+hum = None
 mhi_index = None
-if latest_data is not None:
-    temp = latest_data['Nhiệt độ (°C)']
-    hum = latest_data['Độ ẩm (%)']
-    pump = latest_data['Trạng thái Bơm'] # Lấy trạng thái Bơm
-    fan = latest_data['Trạng thái Quạt'] # Lấy trạng thái Quạt
-    mhi_index = calculate_mushroom_health_index(temp, hum)
-    # LƯU TRỮ TRẠNG THÁI MỚI NHẤT CHO AI TRÒ CHUYỆN
-    st.session_state.latest_climate_data = {"temp": temp, "hum": hum, "mhi": mhi_index, "pump": pump, "fan": fan}
+pump = None
+fan = None
+
+# Xử lý dữ liệu Metrics từ Blynk
+if latest_metrics is not None and is_blynk_success:
+    temp = latest_metrics['Nhiệt độ (°C)']
+    hum = latest_metrics['Độ ẩm (%)']
+    pump = latest_metrics.get('Trạng thái Bơm', 0)
+    fan = latest_metrics.get('Trạng thái Quạt', 0)
+    
+    # Chỉ tính MHI nếu nhiệt độ và độ ẩm không phải NaN
+    if pd.notna(temp) and pd.notna(hum):
+        mhi_index = calculate_mushroom_health_index(temp, hum)
+        # LƯU TRỮ TRẠNG THÁI MỚI NHẤT CHO AI TRÒ CHUYỆN
+        st.session_state.latest_climate_data = {"temp": temp, "hum": hum, "mhi": mhi_index, "pump": pump, "fan": fan}
+    else:
+        # Cập nhật trạng thái lỗi để AI biết
+        st.session_state.latest_climate_data = {"temp": "Lỗi", "hum": "Lỗi", "mhi": 99.99, "pump": pump, "fan": fan}
 
 
 # --- 0. HIỂN THỊ CẢNH BÁO NỔI BẬT ---
-if latest_data is not None:
-    display_alerts(latest_data['Nhiệt độ (°C)'], latest_data['Độ ẩm (%)'])
+if temp is not None and hum is not None and (pd.notna(temp) or pd.notna(hum)): 
+    display_alerts(temp, hum)
 
 
-# --- 1. HIỂN THỊ DỮ LIỆU THÔ VÀ TÍNH TOÁN MHI ---
+# --- 1. HIỂN THỊ DỮ LIỆU METRICS (TỪ BLYNK) ---
 with st.container(border=True):
-    st.subheader("📊 Dữ liệu Cập nhật Mới nhất")
+    st.subheader("📊 Dữ liệu Cập nhật Mới nhất (Nguồn Blynk)")
     
-    if latest_data is None:
-        st.warning("Không thể tải hoặc không có dữ liệu để hiển thị.")
+    if not is_blynk_success or latest_metrics is None or (pd.isna(temp) and pd.isna(hum)):
+        st.warning("⚠️ Không thể tải hoặc phân tích dữ liệu mới nhất từ Blynk. Vui lòng kiểm tra Auth Token và kết nối thiết bị. Xem Log bên dưới để biết chi tiết.")
     else:
-        temp = latest_data['Nhiệt độ (°C)']
-        hum = latest_data['Độ ẩm (%)']
-        pump_status = latest_data['Trạng thái Bơm']
-        fan_status = latest_data['Trạng thái Quạt'] # LẤY TRẠNG THÁI QUẠT
-        
-        # 2. KHẮC PHỤC LỖI CẮT CHỮ METRICS BẰNG CÁCH SỬ DỤNG 6 CỘT ĐỀU NHAU
         col1, col2, col3, col4, col5, col6 = st.columns(6)
         
         # Cột 1: Thời gian
-        col1.metric(label="⏰ Giờ VN", value=latest_data['Thời gian'].strftime("%H:%M:%S"))
-        # Cột 2: Nhiệt độ
-        col2.metric(label="🌡 Nhiệt độ", value=f"{temp:.1f} °C", delta_color="off")
-        # Cột 3: Độ ẩm
-        col3.metric(label="💧 Độ ẩm", value=f"{hum:.1f} %", delta_color="off")
+        col1.metric(label="⏰ Giờ Cập nhật", value=latest_metrics['Thời gian'].strftime("%H:%M:%S"))
         
-        # Cột 4: Trạng thái Bơm/Phun sương (Rút gọn label)
-        pump_text = "ON" if pump_status == 1 else "OFF"
-        pump_color = "inverse" if pump_status == 1 else "off"
+        # Cột 2: Nhiệt độ
+        temp_display = f"{temp:.1f} °C" if pd.notna(temp) else "---"
+        col2.metric(label="🌡 Nhiệt độ", value=temp_display, delta_color="off")
+        
+        # Cột 3: Độ ẩm
+        hum_display = f"{hum:.1f} %" if pd.notna(hum) else "---"
+        col3.metric(label="💧 Độ ẩm", value=hum_display, delta_color="off")
+        
+        # Cột 4: Trạng thái Bơm
+        pump_text = "ON" if pump == 1 else "OFF"
+        pump_color = "inverse" if pump == 1 else "off"
         col4.metric(label="💦 Phun Sương", value=pump_text, delta_color=pump_color)
         
-        # Cột 5: Trạng thái Quạt (Rút gọn label)
-        fan_text = "ON" if fan_status == 1 else "OFF"
-        fan_color = "inverse" if fan_status == 1 else "off"
+        # Cột 5: Trạng thái Quạt
+        fan_text = "ON" if fan == 1 else "OFF"
+        fan_color = "inverse" if fan == 1 else "off"
         col5.metric(label="💨 Thông gió", value=fan_text, delta_color=fan_color)
 
         # Cột 6: Chỉ số MHI
-        if mhi_index is not None:
+        if mhi_index is not None and pd.notna(mhi_index):
             mhi_color = "inverse" if mhi_index > 2.0 else "off"
             col6.metric(label="💚 Sức khỏe Nấm", value=f"{mhi_index:.2f}", delta_color=mhi_color)
+        else:
+            col6.metric(label="💚 Sức khỏe Nấm", value="---", delta_color="off")
 
 
 # --- 2. KHU VỰC HIỂN THỊ GỢI Ý AI TỰ ĐỘNG ---
 with st.container(border=True):
     st.subheader("💡 Gợi ý Tối ưu Môi trường Tự động")
     
-    if latest_data is not None and mhi_index is not None:
+    if temp is not None and hum is not None and mhi_index is not None and pd.notna(temp) and pd.notna(hum):
         ai_suggestion = generate_ai_suggestion(temp, hum, mhi_index)
         
-        # KHẮC PHỤC LỖI CHỮ BỊ CHÌM: Tăng cường độ tương phản màu sắc
         st.markdown(f"""
             <div style="background-color: #f0f2f6; padding: 15px; border-radius: 10px; border-left: 5px solid #2e7d32; color: #1f1f1f;">
                 <p style="font-size: 16px; margin: 0; font-weight: bold; color: #2e7d32;">Lời khuyên từ Cố vấn AI:</p>
@@ -317,20 +425,32 @@ with st.container(border=True):
             </div>
         """, unsafe_allow_html=True)
     else:
-         st.info("Đang chờ dữ liệu ThingSpeak hợp lệ để tạo gợi ý AI...")
+        st.info("Đang chờ dữ liệu Blynk hợp lệ để tạo gợi ý AI...")
 
 
-# --- 3. KHU VỰC HIỂN THỊ BIỂU ĐỒ ---
+# --- 3. KHU VỰC HIỂN THỊ BIỂU ĐỒ (TỪ THINGSPEAK) ---
 with st.container(border=True):
-    st.subheader("📈 Biểu đồ 20 lần đọc gần nhất")
-    if df is not None:
+    st.subheader("📈 Biểu đồ Lịch sử 20 lần đọc (Nguồn ThingSpeak)")
+    if df_history is not None and not df_history.empty:
         # Chỉ vẽ Nhiệt độ và Độ ẩm cho biểu đồ line
-        chart_data = df[['Thời gian', 'Nhiệt độ (°C)', 'Độ ẩm (%)']].set_index('Thời gian').sort_index()
-        # Sử dụng Biểu đồ cột/đường để đẹp hơn
+        chart_data = df_history[['Thời gian', 'Nhiệt độ (°C)', 'Độ ẩm (%)']].set_index('Thời gian').sort_index()
         st.line_chart(chart_data, height=300) 
+    else:
+        st.info("Không có dữ liệu lịch sử từ ThingSpeak để hiển thị biểu đồ.")
     
-    with st.expander("Xem dữ liệu thay đổi cụ thể"):
-        st.dataframe(df)
+    # Giữ expander cho dữ liệu thô, không phải log debug
+    with st.expander("Xem dữ liệu lịch sử cụ thể (ThingSpeak)"):
+        st.dataframe(df_history if df_history is not None else pd.DataFrame(), use_container_width=True)
+
+
+# # --- 4. DEBUG LOG TRỰC TIẾP ---
+# st.subheader("🛠 DEBUG LOG TRỰC TIẾP (QUAN TRỌNG NHẤT)")
+# st.caption("Dùng thông tin này để kiểm tra mã lỗi (Status Code) và Auth Token Blynk.")
+
+# if st.session_state.debug_log:
+#     st.code('\n'.join(st.session_state.debug_log), language='text')
+# else:
+#     st.info("Log sẽ xuất hiện sau lần làm mới đầu tiên.")
 
 # GỌI HÀM LÀM MỚI AN TOÀN
 check_and_rerun()
