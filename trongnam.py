@@ -34,10 +34,10 @@ REFRESH_INTERVAL_SECONDS = 5
 # --- CẤU HÌNH GEMINI AI ---
 # ===================================================================
 # LƯU Ý: VUI LÒNG ĐẢM BẢO KHÓA API NÀY LÀ HỢP LỆ VÀ ĐƯỢC KÍCH HOẠT
-GEMINI_API_KEY = "AIzaSyDf5v_2zUwCvnq3ObPdj49Bmo9Q7_MBq7k"
+GEMINI_API_KEY = "AIzaSyDSDmcWUfWahlgtzFv5LVyUTKpHr7hZxbk"
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent"
-SYSTEM_PROMPT = """Bạn là một chuyên gia về nuôi trồng nấm (Mycologist) với kiến thức chuyên sâu về nấm Bào Ngư.
-QUY TẮC VÀNG TỔNG HỢP cho NẤM BÀO NGƯ (Mọi giai đoạn):
+SYSTEM_PROMPT = """Bạn là một chuyên gia về nuôi trồng nấm (Mycologist) với kiến thức chuyên sâu về nấm .
+QUY TẮC VÀNG TỔNG HỢP cho nấm (Mọi giai đoạn):
 1. Môi trường Lý tưởng Tổng thể: Nhiệt độ 25°C - 30°C, Độ ẩm 80% - 85%.
 2. Nguy hiểm: T > 30°C (Quá nóng) hoặc H < 65% (Quá khô).
 

@@ -53,8 +53,8 @@ def fetch_latest_data():
         r = requests.get(THINGSPEAK_URL, timeout=10)
         r.raise_for_status()
         data = r.json()
-        temp = float(data.get("field2", 0))
-        hum = float(data.get("field1", 0))
+        temp = float(data.get("field1", 0))
+        hum = float(data.get("field2", 0))
         return temp, hum
     except Exception as e:
         print(f"⚠️ [ThingSpeak] Lỗi đọc dữ liệu: {e}")
